@@ -6,8 +6,14 @@ import os
 import argparse
 from pathlib import Path
 
+# Audio analysis constants
+WINDOW_SIZE = 2048
+HOP_LENGTH = 512
+SAMPLE_RATE = 44100
+BPM = 120  # Default BPM value
+
 class AudioAnalyzer:
-    def __init__(self, window_size: int = 2048, hop_length: int = 512):
+    def __init__(self, window_size: int = WINDOW_SIZE, hop_length: int = HOP_LENGTH):
         """
         Initialize the audio analyzer with analysis parameters.
         
@@ -18,57 +24,37 @@ class AudioAnalyzer:
         self.window_size = window_size
         self.hop_length = hop_length
 
-    def analyze_bpm(self, y: np.ndarray, sr: int) -> float:
+    def calculate_spectral_flux(self, y: np.ndarray, sr: int) -> np.ndarray:
         """
-        Analyze BPM using multiple methods for better accuracy.
+        Calculate spectral flux for each second of audio.
         
         Args:
             y: Audio time series
             sr: Sample rate
             
         Returns:
-            Estimated BPM value
+            Array of spectral flux values for each second
         """
-        # Method 1: Onset strength
-        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
-        bpm1 = librosa.beat.tempo(onset_envelope=onset_env, sr=sr)[0]
+        # Calculate spectrogram
+        D = np.abs(librosa.stft(y, n_fft=self.window_size, hop_length=self.hop_length))
         
-        # Method 2: Dynamic programming beat tracker
-        tempo2, _ = librosa.beat.beat_track(y=y, sr=sr)
+        # Calculate spectral flux
+        flux = np.diff(D, axis=1)
+        flux = np.sum(flux**2, axis=0)
         
-        # Method 3: Autocorrelation
-        y_harmonic, _ = librosa.effects.hpss(y)
-        tempo3, _ = librosa.beat.beat_track(y=y_harmonic, sr=sr)
+        # Convert to per-second values
+        seconds = int(len(y) / sr)
+        flux_per_second = np.zeros(seconds)
         
-        # Combine results (weighted average)
-        bpm = (bpm1 + tempo2 + tempo3) / 3
-        return bpm
-
-    def check_audio_quality(self, y: np.ndarray, sr: int) -> Dict:
-        """
-        Check audio quality and return metrics.
+        for i in range(seconds):
+            start_frame = i * sr // self.hop_length
+            end_frame = (i + 1) * sr // self.hop_length
+            if end_frame > len(flux):
+                end_frame = len(flux)
+            if start_frame < len(flux):
+                flux_per_second[i] = np.mean(flux[start_frame:end_frame])
         
-        Args:
-            y: Audio time series
-            sr: Sample rate
-            
-        Returns:
-            Dictionary with quality metrics
-        """
-        # Calculate signal-to-noise ratio
-        noise_floor = np.mean(np.abs(y[y < np.percentile(y, 10)]))
-        signal_level = np.mean(np.abs(y[y > np.percentile(y, 90)]))
-        snr = 20 * np.log10(signal_level / (noise_floor + 1e-10))
-        
-        # Calculate dynamic range
-        dynamic_range = 20 * np.log10(np.max(np.abs(y)) / (np.min(np.abs(y[y > 0])) + 1e-10))
-        
-        return {
-            "signal_to_noise_ratio": float(snr),
-            "dynamic_range": float(dynamic_range),
-            "sample_rate": sr,
-            "duration": float(librosa.get_duration(y=y, sr=sr))
-        }
+        return flux_per_second
 
     def analyze_audio(self, file_path: str) -> Dict:
         """
@@ -83,11 +69,11 @@ class AudioAnalyzer:
         # Load audio file
         y, sr = librosa.load(file_path)
         
-        # Check audio quality
-        quality_metrics = self.check_audio_quality(y, sr)
-        
         # Calculate duration in seconds
         duration = librosa.get_duration(y=y, sr=sr)
+        
+        # Calculate spectral flux
+        spectral_flux = self.calculate_spectral_flux(y, sr)
         
         # Initialize arrays for per-second analysis
         seconds = np.arange(0, int(duration))
@@ -95,7 +81,6 @@ class AudioAnalyzer:
         # Calculate features for each second
         rms_values = []
         spectral_centroids = []
-        bpm_values = []
         
         for second in seconds:
             # Get the audio segment for this second
@@ -116,30 +101,25 @@ class AudioAnalyzer:
                                                            n_fft=self.window_size, 
                                                            hop_length=self.hop_length)[0]
                 spectral_centroids.append(float(np.mean(centroid)))
-                
-                # Calculate BPM for this second
-                bpm = self.analyze_bpm(segment, sr)
-                bpm_values.append(float(bpm))
             else:
                 rms_values.append(0.0)
                 spectral_centroids.append(0.0)
-                bpm_values.append(0.0)
         
         # Normalize all features to 0-1 range
         rms_normalized = librosa.util.normalize(np.array(rms_values))
         spectral_centroids_normalized = librosa.util.normalize(np.array(spectral_centroids))
-        bpm_normalized = librosa.util.normalize(np.array(bpm_values))
+        spectral_flux_normalized = librosa.util.normalize(spectral_flux)
         
         # Create result dictionary
         result = {
-            "audio_quality": quality_metrics,
+            "bpm": BPM,  # Using constant BPM
             "frames": []
         }
         
         # Add frame-by-frame analysis
         for i in range(len(seconds)):
             frame_data = {
-                "bpm": float(bpm_normalized[i]),
+                "spectral_flux": float(spectral_flux_normalized[i]),
                 "energy": float(rms_normalized[i]),
                 "spectral_centroid": float(spectral_centroids_normalized[i])
             }
@@ -191,13 +171,7 @@ def main():
         # Save the results
         analyzer.save_analysis(analysis, output_file)
         print(f"Analysis complete. Results saved to {output_file}")
-        
-        # Print quality metrics
-        print("\nAudio Quality Metrics:")
-        print(f"Signal-to-Noise Ratio: {analysis['audio_quality']['signal_to_noise_ratio']:.2f} dB")
-        print(f"Dynamic Range: {analysis['audio_quality']['dynamic_range']:.2f} dB")
-        print(f"Sample Rate: {analysis['audio_quality']['sample_rate']} Hz")
-        print(f"Duration: {analysis['audio_quality']['duration']:.2f} seconds")
+        print(f"BPM: {BPM}")
     else:
         print(f"Audio file not found: {audio_file}")
 
